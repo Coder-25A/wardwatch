@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  WardWatch - monsoon and civic issue reporter for one city ward.
+  Residents report flooded drains, potholes, garbage and broken streetlights.
+  Free-tier friendly: Lambda (arm64), API Gateway REST API, DynamoDB on-demand.
+
+# ---------------------------------------------------------------------------
+# Settings shared by every Lambda function below.
+# ---------------------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures:
+      - arm64            # Graviton: cheaper per ms than x86
+    MemorySize: 128      # smallest size, plenty for this app
+    Timeout: 10
+    CodeUri: src/
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref ReportsTable
+        WARD_NAME: !Ref WardName
+
+Parameters:
+  WardName:
+    Type: String
+    Default: "Ward 12"
+    Description: Display name of the ward this deployment serves.
+
+Resources:
+  # -------------------------------------------------------------------------
+  # Data: one DynamoDB table holding every report.
+  # -------------------------------------------------------------------------
+  ReportsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST          # on-demand: pay only per request, nothing when idle
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true                    # encryption at rest with the AWS managed KMS key
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false   # off on purpose: PITR is billed per GB-month
+      Tags:
+        - Key: project
+          Value: wardwatch
+
+  # -------------------------------------------------------------------------
+  # API: a REST API. NOTE: no throttling is configured here on purpose.
+  # This is the "before" state. See FIX.md for the "after" change.
+  # -------------------------------------------------------------------------
+  WardWatchApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      # AFTER (part 1): throttling at API Gateway.
+      MethodSettings:
+        # Backstop for anyone who skips CloudFront and calls the API URL directly.
+        # Residents go through CloudFront, whose cache absorbs reads, so they never reach this.
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingRateLimit: 10
+          ThrottlingBurstLimit: 20
+        # Strict limit on new reports, to stop spam. "/~1reports" means "/reports".
+        - ResourcePath: "/~1reports"
+          HttpMethod: "POST"
+          ThrottlingRateLimit: 2
+          ThrottlingBurstLimit: 5
+      EndpointConfiguration:
+        Type: REGIONAL
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type'"
+        AllowOrigin: "'*'"
+        MaxAge: "'600'"
+
+  # -------------------------------------------------------------------------
+  # Log groups with a 7 day retention, so logs never pile up forever.
+  # -------------------------------------------------------------------------
+  CreateReportLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-create-report"
+      RetentionInDays: 7
+
+  ListReportsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-list-reports"
+      RetentionInDays: 7
+
+  # -------------------------------------------------------------------------
+  # POST /reports : a resident submits a new report.
+  # Permission: write-only on this one table (least privilege).
+  # -------------------------------------------------------------------------
+  CreateReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: create_report.handler
+      Description: Validate and store a new ward report
+      LoggingConfig:
+        LogFormat: JSON                 # structured logs
+        ApplicationLogLevel: INFO
+        SystemLogLevel: WARN
+        LogGroup: !Ref CreateReportLogGroup
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref ReportsTable
+      Events:
+        CreateReport:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WardWatchApi
+            Path: /reports
+            Method: post
+
+  # -------------------------------------------------------------------------
+  # GET /reports : anyone can view the list. Public and unauthenticated.
+  # Uses a table Scan with pagination. Permission: read-only on this table.
+  # -------------------------------------------------------------------------
+  ListReportsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: list_reports.handler
+      Description: Return a page of ward reports (table Scan)
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
+        SystemLogLevel: WARN
+        LogGroup: !Ref ListReportsLogGroup
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ReportsTable
+      Events:
+        ListReports:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WardWatchApi
+            Path: /reports
+            Method: get
+
+  # -------------------------------------------------------------------------
+  # AFTER (part 2): CloudFront in front of the API.
+  # GET /reports is cached for 30 seconds at the edge, so a flood rush of
+  # residents is served from the cache instead of hitting Lambda + DynamoDB.
+  # POST is never cached; it passes through to API Gateway (strict limit above).
+  # Uses the default *.cloudfront.net certificate: no ACM, no custom domain,
+  # nothing created in us-east-1.
+  # -------------------------------------------------------------------------
+  ReportsCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "${AWS::StackName}-reports-30s"
+        Comment: Cache GET /reports for 30 seconds, keyed on limit and next only
+        MinTTL: 0
+        DefaultTTL: 30          # used because the API sends no Cache-Control header
+        MaxTTL: 30
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          QueryStringsConfig:
+            QueryStringBehavior: whitelist
+            QueryStrings:
+              - limit
+              - next
+          HeadersConfig:
+            HeaderBehavior: none
+          CookiesConfig:
+            CookieBehavior: none
+
+  WardWatchCdn:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "WardWatch (${AWS::StackName}) - cached reads, protected API"
+        HttpVersion: http2and3
+        PriceClass: PriceClass_200      # includes edge locations in India
+        Origins:
+          - Id: wardwatch-api
+            DomainName: !Sub "${WardWatchApi}.execute-api.${AWS::Region}.amazonaws.com"
+            OriginPath: /prod
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+        DefaultCacheBehavior:
+          TargetOriginId: wardwatch-api
+          ViewerProtocolPolicy: https-only
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]    # POST is never cached
+          Compress: true
+          CachePolicyId: !Ref ReportsCachePolicy
+          # Managed policy "AllViewerExceptHostHeader": forwards everything except
+          # the Host header, which API Gateway needs to be its own domain.
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the WardWatch API (add "reports" to the end)
+    Value: !Sub "https://${WardWatchApi}.execute-api.${AWS::Region}.amazonaws.com/prod/"
+  ReportsEndpoint:
+    Description: Full URL for GET and POST /reports
+    Value: !Sub "https://${WardWatchApi}.execute-api.${AWS::Region}.amazonaws.com/prod/reports"
+  ReportsTableName:
+    Description: DynamoDB table that stores reports
+    Value: !Ref ReportsTable
+  CloudFrontReportsUrl:
+    Description: AFTER - public URL residents should use (cached GET, protected POST)
+    Value: !Sub "https://${WardWatchCdn.DomainName}/reports"
+  CloudFrontDistributionId:
+    Description: CloudFront distribution id
+    Value: !Ref WardWatchCdn

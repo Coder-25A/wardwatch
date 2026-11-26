@@ -1,0 +1,1 @@
+# No extra packages needed. boto3 is already included in the AWS Lambda Python runtime.

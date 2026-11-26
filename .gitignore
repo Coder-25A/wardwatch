@@ -1,0 +1,22 @@
+# SAM build output
+.aws-sam/
+# SAM deploy settings saved on your PC (no secrets, but personal to your account)
+samconfig.toml
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Well-Architected review reports are CONFIDENTIAL. Keep them local only.
+private/
+*review-report*
+review-*.md
+*-review.md
+
+# OS / editor clutter
+.DS_Store
+Thumbs.db
+.vscode/

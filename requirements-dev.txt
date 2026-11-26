@@ -1,0 +1,4 @@
+# Needed only on your PC: unit tests and the helper scripts. Not deployed to AWS.
+pytest>=8
+moto[dynamodb]>=5
+boto3>=1.41  # 1.41+ understands "aws login" sessions

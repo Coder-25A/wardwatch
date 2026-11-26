@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WardWatch</title>
+<style>
+  body { font-family: system-ui, Segoe UI, Arial, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; color: #1d2733; }
+  h1 { margin-bottom: 4px; } .sub { color: #5b6773; margin-top: 0; }
+  fieldset { border: 1px solid #cfd8e0; border-radius: 8px; margin: 16px 0; padding: 12px 16px; }
+  label { display: block; margin: 8px 0 4px; font-weight: 600; font-size: 14px; }
+  input, select, textarea { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #b7c3cc; border-radius: 6px; font: inherit; }
+  textarea { min-height: 70px; } .row { display: flex; gap: 12px; } .row > div { flex: 1; }
+  button { margin-top: 12px; padding: 8px 16px; border: 0; border-radius: 6px; background: #0b6bcb; color: #fff; font: inherit; cursor: pointer; }
+  button.secondary { background: #e6edf3; color: #1d2733; }
+  #msg { margin-top: 8px; font-size: 14px; } .ok { color: #137333; } .err { color: #b3261e; }
+  .card { border: 1px solid #dbe3ea; border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+  .tag { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #e8f0fe; color: #0b57d0; }
+  .meta { font-size: 12px; color: #5b6773; }
+</style>
+</head>
+<body>
+<h1>WardWatch</h1>
+<p class="sub">Report flooded drains, potholes, garbage and broken streetlights in our ward.</p>
+
+<fieldset>
+  <legend>API</legend>
+  <label for="api">Reports URL: <code>ReportsEndpoint</code> from <code>sam deploy</code> (after the fix, use <code>CloudFrontReportsUrl</code>)</label>
+  <input id="api" placeholder="https://abc123.execute-api.ap-southeast-2.amazonaws.com/prod/reports">
+  <button class="secondary" id="saveApi">Save URL</button>
+</fieldset>
+
+<fieldset>
+  <legend>New report</legend>
+  <form id="form">
+    <label for="category">What is the problem?</label>
+    <select id="category" required>
+      <option value="flooded_drain">Flooded or blocked drain</option>
+      <option value="pothole">Pothole</option>
+      <option value="garbage">Garbage not cleared</option>
+      <option value="streetlight">Broken streetlight</option>
+    </select>
+    <label for="description">Description (max 500 characters)</label>
+    <textarea id="description" maxlength="500" required></textarea>
+    <div class="row">
+      <div><label for="area">Area / street</label><input id="area" maxlength="100" required></div>
+      <div><label for="landmark">Landmark (optional)</label><input id="landmark" maxlength="100"></div>
+    </div>
+    <div class="row">
+      <div><label for="lat">Latitude (optional)</label><input id="lat" type="number" step="any"></div>
+      <div><label for="lng">Longitude (optional)</label><input id="lng" type="number" step="any"></div>
+    </div>
+    <button type="button" class="secondary" id="locate">Use my location</button>
+    <button type="submit">Submit report</button>
+  </form>
+  <div id="msg"></div>
+</fieldset>
+
+<h2>Reports <button class="secondary" id="refresh">Refresh</button></h2>
+<div id="list"><p class="meta">Save the API URL above, then press Refresh.</p></div>
+<button class="secondary" id="more" hidden>Load more</button>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const labels = { flooded_drain: "Flooded drain", pothole: "Pothole", garbage: "Garbage", streetlight: "Streetlight" };
+let nextToken = null;
+
+$("api").value = localStorage.getItem("wardwatchApi") || "";
+$("saveApi").onclick = () => { localStorage.setItem("wardwatchApi", $("api").value.trim()); loadReports(true); };
+const apiUrl = () => $("api").value.trim();
+
+function show(text, ok) { $("msg").textContent = text; $("msg").className = ok ? "ok" : "err"; }
+
+function card(r) {
+  const div = document.createElement("div");
+  div.className = "card";
+  const head = document.createElement("div");
+  const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = labels[r.category] || r.category;
+  head.append(tag, " ", r.area + (r.landmark ? " (" + r.landmark + ")" : ""));
+  const p = document.createElement("p"); p.textContent = r.description;
+  const meta = document.createElement("div"); meta.className = "meta";
+  meta.textContent = new Date(r.created_at).toLocaleString() + " | " + r.status + (r.lat !== undefined ? " | " + r.lat + ", " + r.lng : "");
+  div.append(head, p, meta);
+  return div;
+}
+
+async function loadReports(reset) {
+  if (!apiUrl()) { show("Paste the API URL first.", false); return; }
+  if (reset) { nextToken = null; $("list").innerHTML = ""; }
+  try {
+    const url = new URL(apiUrl()); url.searchParams.set("limit", "20");
+    if (nextToken) url.searchParams.set("next", nextToken);
+    const res = await fetch(url);
+    const data = await res.json();
+    if (res.status === 429) { show("Too many people are loading the list right now. Wait a few seconds and press Refresh.", false); return; }
+    if (!res.ok) { show("Error " + res.status + ": " + (data.error || data.message), false); return; }
+    if (reset && data.items.length === 0) $("list").innerHTML = '<p class="meta">No reports yet.</p>';
+    data.items.forEach((r) => $("list").appendChild(card(r)));
+    nextToken = data.next || null;
+    $("more").hidden = !nextToken;
+  } catch (e) { show("Could not reach the API: " + e.message, false); }
+}
+
+$("refresh").onclick = () => loadReports(true);
+$("more").onclick = () => loadReports(false);
+
+$("locate").onclick = () => navigator.geolocation.getCurrentPosition(
+  (pos) => { $("lat").value = pos.coords.latitude.toFixed(6); $("lng").value = pos.coords.longitude.toFixed(6); },
+  () => show("Location not available.", false));
+
+$("form").onsubmit = async (e) => {
+  e.preventDefault();
+  if (!apiUrl()) { show("Paste the API URL first.", false); return; }
+  const body = { category: $("category").value, description: $("description").value, area: $("area").value };
+  if ($("landmark").value) body.landmark = $("landmark").value;
+  if ($("lat").value && $("lng").value) { body.lat = Number($("lat").value); body.lng = Number($("lng").value); }
+  try {
+    const res = await fetch(apiUrl(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (res.ok) {
+      // The public list may be cached for up to 30 seconds (CloudFront), so show
+      // the new report straight away instead of waiting for the cache to refresh.
+      show("Report saved. Thank you! The public list updates within about 30 seconds.", true);
+      $("form").reset();
+      const list = $("list");
+      if (list.querySelector("p.meta")) list.innerHTML = "";
+      list.prepend(card(data));
+    }
+    else if (res.status === 429) show("Too many reports right now. Please wait a few seconds and submit again.", false);
+    else show("Error " + res.status + ": " + (data.error || data.message) + (data.details ? " " + JSON.stringify(data.details) : ""), false);
+  } catch (err) { show("Could not reach the API: " + err.message, false); }
+};
+</script>
+</body>
+</html>
