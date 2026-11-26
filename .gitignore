@@ -20,3 +20,7 @@ review-*.md
 .DS_Store
 Thumbs.db
 .vscode/
+.wa-review-scratch-*/
+aws-well-architected-review-ledger/
+.wa-review-scratch-*/
+aws-well-architected-review-ledger/

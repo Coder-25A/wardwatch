@@ -1,0 +1,21 @@
+{
+  "url": "https://y7ndi37hbc.execute-api.ap-southeast-2.amazonaws.com/prod/reports",
+  "method": "POST",
+  "start_utc": "2026-11-26T08:07:20+00:00",
+  "time_utc": "2026-11-26T08:07:28+00:00",
+  "total": 30,
+  "concurrency": 8,
+  "counts": {
+    "201": 30
+  },
+  "cache": {
+    "none": 30
+  },
+  "p50_ms": 1322.7,
+  "p95_ms": 4376.1,
+  "max_ms": 4643.8,
+  "p50_ok_ms": 1322.7,
+  "wall_seconds": 8.25,
+  "requests_per_second": 3.6,
+  "label": "post-spam-before"
+}

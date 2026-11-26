@@ -1,9 +1,7 @@
 """GET /reports - return a page of reports.
 
-This uses a DynamoDB Scan, which reads the whole table page by page.
-That is fine for one small ward, but the endpoint is public and has no
-throttling yet, so anyone can call it as fast as they like. That is the
-weak spot the Well-Architected review should find.
+Reads reports from DynamoDB with a Scan, page by page, using an
+optional `limit` and a `next` pagination token.
 """
 
 import base64
